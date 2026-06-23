@@ -1,3 +1,12 @@
+---
+title: LitReview Assistant
+emoji: 📚
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # Literature Review Writing Assistant
 
 综述写作辅助器 — automatically analyze dozens of academic papers to identify shared methods, routine expressions, similar backgrounds, research problems, figure patterns, and unsolved questions.
