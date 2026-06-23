@@ -160,7 +160,15 @@ def cluster_texts(embeddings: np.ndarray, threshold: float = 0.75,
     if len(embeddings) < 2:
         return [[0]] if len(embeddings) == 1 else []
 
+    # Compute distance, replace NaN/Inf with safe values
     dist = pdist(embeddings, metric="cosine")
+    dist = np.nan_to_num(dist, nan=0.0, posinf=1.0, neginf=0.0)
+    # Clamp to valid range
+    dist = np.clip(dist, 0.0, 2.0)
+
+    if len(dist) == 0 or np.all(dist == 0):
+        return [list(range(len(embeddings)))] if min_cluster_size <= len(embeddings) else []
+
     Z = linkage(dist, method="ward")
     labels = fcluster(Z, t=1.0 - threshold, criterion="distance")
 
