@@ -1,0 +1,13 @@
+streamlit>=1.42
+PyMuPDF>=1.27
+sentence-transformers>=3.0
+scikit-learn>=1.6
+nltk>=3.9
+plotly>=5.22
+pyvis>=0.3
+pandas>=2.2
+numpy>=2.0
+Pillow>=11.0
+langdetect>=1.0
+torch>=2.5
+scipy>=1.12
