@@ -1,62 +1,83 @@
-"""Embedding generation with sentence-transformers and TF-IDF."""
+"""Text embedding and similarity — light TF-IDF by default, optional sentence-transformers.
+
+Strategy: Use sklearn TF-IDF (fast, no GPU, tiny install) as the primary engine.
+If sentence-transformers is installed, use it for semantic similarity instead.
+"""
 
 import numpy as np
-from typing import Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 
+# Try to import sentence-transformers for better semantic similarity
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
+
+
 class Embedder:
-    """Lazy-loading wrapper for sentence-transformers.
+    """Text embedder that auto-selects sentence-transformers or TF-IDF.
 
-    Uses paraphrase-multilingual-MiniLM-L12-v2 which supports 50+ languages
-    including English and Chinese, and is small enough for CPU deployment.
+    Uses sentence-transformers if available (better semantic understanding).
+    Falls back to TF-IDF word n-grams if not (fast, lightweight, always works).
     """
-
-    _instance = None
-    _model = None
 
     def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
         self.model_name = model_name
+        self._st_model = None
+        self._tfidf = None
+        self._tfidf_texts = None
+        self._mode = "sentence-transformers" if HAS_SENTENCE_TRANSFORMERS else "tfidf"
 
     @property
-    def model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
+    def mode(self) -> str:
+        return self._mode
 
-    def embed(self, texts: list[str], batch_size: int = 32,
-              show_progress: bool = False) -> np.ndarray:
-        """Generate embeddings for a list of texts.
+    def _get_st_model(self):
+        if self._st_model is None and HAS_SENTENCE_TRANSFORMERS:
+            self._st_model = SentenceTransformer(self.model_name)
+        return self._st_model
 
-        Args:
-            texts: List of text strings to embed.
-            batch_size: Batch size for encoding.
-            show_progress: Whether to show a progress bar.
-
-        Returns numpy array of shape (len(texts), embedding_dim).
-        """
+    def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
+        """Generate embeddings for a list of texts."""
         if not texts:
             return np.array([])
-        # Filter empty texts
-        non_empty = [t if t.strip() else " " for t in texts]
-        embeddings = self.model.encode(
-            non_empty,
-            batch_size=batch_size,
-            show_progress_bar=show_progress,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        return embeddings
+
+        if HAS_SENTENCE_TRANSFORMERS:
+            non_empty = [t if t.strip() else " " for t in texts]
+            return self._get_st_model().encode(
+                non_empty, show_progress_bar=show_progress,
+                convert_to_numpy=True, normalize_embeddings=True,
+            )
+        else:
+            # TF-IDF fallback
+            if self._tfidf is None:
+                self._tfidf = TfidfVectorizer(
+                    analyzer="word",
+                    ngram_range=(1, 2),
+                    max_features=5000,
+                    lowercase=True,
+                    stop_words="english",
+                )
+            clean = [t if t.strip() else "placeholder" for t in texts]
+            tfidf_matrix = self._tfidf.fit_transform(clean)
+            # Convert to dense and normalize
+            dense = tfidf_matrix.toarray().astype(np.float32)
+            norms = np.linalg.norm(dense, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            return dense / norms
+
+    def embed_with_cache(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
+        """Same as embed(), for backward compat."""
+        return self.embed(texts, show_progress=show_progress)
 
     def similarity(self, text_a: str, text_b: str) -> float:
-        """Compute cosine similarity between two texts."""
         emb = self.embed([text_a, text_b])
         return float(cosine_similarity([emb[0]], [emb[1]])[0][0])
 
     def pairwise_similarity_matrix(self, texts: list[str]) -> np.ndarray:
-        """Compute pairwise cosine similarity for a list of texts."""
         emb = self.embed(texts)
         return cosine_similarity(emb)
 
@@ -65,10 +86,10 @@ class TfidfPhraseFinder:
     """TF-IDF based phrase similarity for boilerplate detection.
 
     Uses character n-grams for language-agnostic matching of near-identical
-    expressions.
+    expressions. Always uses sklearn — no heavy dependencies.
     """
 
-    def __init__(self, char_ngram_range: tuple = (3, 6), max_features: int = 10000):
+    def __init__(self, char_ngram_range: tuple = (3, 6), max_features: int = 8000):
         self.vectorizer = TfidfVectorizer(
             analyzer="char",
             ngram_range=char_ngram_range,
@@ -77,28 +98,14 @@ class TfidfPhraseFinder:
         )
 
     def fit_transform(self, texts: list[str]) -> np.ndarray:
-        """Fit the vectorizer and transform texts to TF-IDF vectors.
-
-        Returns sparse matrix of shape (len(texts), n_features).
-        """
         non_empty = [t if t.strip() else "placeholder" for t in texts]
         return self.vectorizer.fit_transform(non_empty)
 
     def transform(self, texts: list[str]) -> np.ndarray:
-        """Transform new texts using the fitted vectorizer."""
         return self.vectorizer.transform(texts)
 
     def find_similar_pairs(self, texts: list[str], threshold: float = 0.65,
                            max_pairs: int = 500) -> list[dict]:
-        """Find pairs of texts with high TF-IDF cosine similarity.
-
-        Args:
-            texts: List of text strings to compare.
-            threshold: Minimum cosine similarity to flag.
-            max_pairs: Maximum number of pairs to return.
-
-        Returns list of {idx_a, idx_b, similarity, text_a, text_b}.
-        """
         if len(texts) < 2:
             return []
 
@@ -127,7 +134,7 @@ class TfidfPhraseFinder:
 
 
 def extract_shared_phrase(text_a: str, text_b: str, min_length: int = 10) -> str:
-    """Extract the longest common substring from two texts (approximate).
+    """Extract the longest common substring from two texts.
 
     Uses a word-level sliding window for efficiency.
     """
@@ -146,32 +153,19 @@ def extract_shared_phrase(text_a: str, text_b: str, min_length: int = 10) -> str
 
 def cluster_texts(embeddings: np.ndarray, threshold: float = 0.75,
                   min_cluster_size: int = 2) -> list[list[int]]:
-    """Cluster texts using agglomerative clustering on cosine distance.
-
-    Args:
-        embeddings: Normalized embedding matrix.
-        threshold: Cosine distance threshold for clustering.
-        min_cluster_size: Minimum number of items per cluster.
-
-    Returns list of clusters, each cluster being a list of indices.
-    """
+    """Cluster texts using agglomerative clustering on cosine distance."""
     from scipy.cluster.hierarchy import linkage, fcluster
     from scipy.spatial.distance import pdist
 
     if len(embeddings) < 2:
         return [[0]] if len(embeddings) == 1 else []
 
-    # Compute cosine distance
     dist = pdist(embeddings, metric="cosine")
-    # Ward linkage on cosine distance
     Z = linkage(dist, method="ward")
-    # Cut at threshold (cosine distance threshold)
     labels = fcluster(Z, t=1.0 - threshold, criterion="distance")
 
-    # Group by label
     clusters = {}
     for idx, label in enumerate(labels):
         clusters.setdefault(int(label), []).append(idx)
 
-    # Filter by min size
     return [c for c in clusters.values() if len(c) >= min_cluster_size]
